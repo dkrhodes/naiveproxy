@@ -17,6 +17,7 @@
 #include "net/base/host_port_pair.h"
 #include "net/base/net_export.h"
 #include "net/base/proxy_server.h"
+#include "net/base/socks5_auth_credentials.h"
 
 namespace base {
 class Pickle;
@@ -79,7 +80,8 @@ class NET_EXPORT ProxyChain {
   static ProxyChain ForIpProtection(std::vector<ProxyServer> proxy_server_list,
                                     int chain_id = 0) {
     return ProxyChain(std::move(proxy_server_list), chain_id,
-                      /*opaque_data=*/std::nullopt);
+                      /*opaque_data=*/std::nullopt,
+                      /*socks5_auth=*/std::nullopt);
   }
 
   // Creates a `ProxyChain` with `opaque_data` attached to it. This can be later
@@ -90,7 +92,17 @@ class NET_EXPORT ProxyChain {
                                    int opaque_data) {
     return ProxyChain(std::move(proxy_server_list),
                       /*ip_protection_chain_id=*/kNotIpProtectionChainId,
-                      opaque_data);
+                      opaque_data, /*socks5_auth=*/std::nullopt);
+  }
+
+  // `socks5_auth` is used only for single SOCKS5 hops (e.g. Cronet experimental
+  // proxy). It is not persisted in `Persist()`.
+  static ProxyChain WithOpaqueData(std::vector<ProxyServer> proxy_server_list,
+                                   int opaque_data,
+                                   std::optional<Socks5AuthCredentials> socks5_auth) {
+    return ProxyChain(std::move(proxy_server_list),
+                      /*ip_protection_chain_id=*/kNotIpProtectionChainId,
+                      opaque_data, std::move(socks5_auth));
   }
 
   // Attempt to create a new `ProxyChain` from a pickle that contains data
@@ -200,6 +212,12 @@ class NET_EXPORT ProxyChain {
 
   std::optional<int> opaque_data() const { return opaque_data_; }
 
+  // SOCKS5 username/password to offer during RFC 1929 subnegotiation. Empty
+  // optional means advertise only the "no authentication" method.
+  const std::optional<Socks5AuthCredentials>& socks5_auth() const {
+    return socks5_auth_;
+  }
+
   friend bool operator==(const ProxyChain&, const ProxyChain&) = default;
   friend auto operator<=>(const ProxyChain&, const ProxyChain&) = default;
 
@@ -222,7 +240,9 @@ class NET_EXPORT ProxyChain {
  private:
   explicit ProxyChain(std::vector<ProxyServer> proxy_server_list,
                       int ip_protection_chain_id,
-                      std::optional<int> opaque_data);
+                      std::optional<int> opaque_data,
+                      std::optional<Socks5AuthCredentials> socks5_auth =
+                          std::nullopt);
 
   std::optional<std::vector<ProxyServer>> proxy_server_list_;
 
@@ -237,6 +257,8 @@ class NET_EXPORT ProxyChain {
   // Note: the value of this field does not affect the validity of this
   // ProxyChain.
   std::optional<int> opaque_data_;
+
+  std::optional<Socks5AuthCredentials> socks5_auth_;
 
   // Returns true if this chain is valid. A chain is considered valid if
   //  (1) it is a single valid proxy server, or

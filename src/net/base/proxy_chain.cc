@@ -73,9 +73,10 @@ std::optional<ProxyChain> ProxyChain::InitFromPickle(
     proxy_server_list.push_back(ProxyServer::CreateFromPickle(&pickle_iter));
   }
 
-  ProxyChain chain =
-      ProxyChain(std::move(proxy_server_list), ip_protection_chain_id,
-                 /*opaque_data=*/std::nullopt);
+  ProxyChain chain = ProxyChain(std::move(proxy_server_list),
+                                ip_protection_chain_id,
+                                /*opaque_data=*/std::nullopt,
+                                /*socks5_auth=*/std::nullopt);
   if (!chain.IsValid()) {
     return std::nullopt;
   }
@@ -109,9 +110,14 @@ const std::vector<ProxyServer>& ProxyChain::proxy_servers() const {
 std::pair<ProxyChain, const ProxyServer&> ProxyChain::SplitLast() const {
   DCHECK(IsValid());
   DCHECK_NE(length(), 0u);
+  const size_t new_size = proxy_server_list_->size() - 1;
+  std::optional<Socks5AuthCredentials> auth_for_prefix;
+  if (new_size > 0) {
+    auth_for_prefix = socks5_auth_;
+  }
   ProxyChain new_chain =
       ProxyChain({proxy_server_list_->begin(), proxy_server_list_->end() - 1},
-                 ip_protection_chain_id_, opaque_data_);
+                 ip_protection_chain_id_, opaque_data_, std::move(auth_for_prefix));
   CHECK(new_chain.IsValid());
   return std::make_pair(std::move(new_chain),
                         std::ref(proxy_server_list_->back()));
@@ -120,9 +126,13 @@ std::pair<ProxyChain, const ProxyServer&> ProxyChain::SplitLast() const {
 ProxyChain ProxyChain::Prefix(size_t len) const {
   DCHECK(IsValid());
   DCHECK_LE(len, length());
+  std::optional<Socks5AuthCredentials> auth_for_prefix;
+  if (len > 0) {
+    auth_for_prefix = socks5_auth_;
+  }
   auto new_chain = ProxyChain(
       {proxy_server_list_->begin(), proxy_server_list_->begin() + len},
-      ip_protection_chain_id_, opaque_data_);
+      ip_protection_chain_id_, opaque_data_, std::move(auth_for_prefix));
   CHECK(new_chain.IsValid());
   return new_chain;
 }
@@ -200,10 +210,12 @@ std::string ProxyChain::GetHistogramSuffix() const {
 
 ProxyChain::ProxyChain(std::vector<ProxyServer> proxy_server_list,
                        int ip_protection_chain_id,
-                       std::optional<int> opaque_data)
+                       std::optional<int> opaque_data,
+                       std::optional<Socks5AuthCredentials> socks5_auth)
     : proxy_server_list_(std::move(proxy_server_list)),
       ip_protection_chain_id_(ip_protection_chain_id),
-      opaque_data_(opaque_data) {
+      opaque_data_(opaque_data),
+      socks5_auth_(std::move(socks5_auth)) {
   if (!IsValidInternal()) {
     *this = ProxyChain();
   }

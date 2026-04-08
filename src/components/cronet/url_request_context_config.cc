@@ -17,13 +17,17 @@
 #include "base/metrics/field_trial_params.h"
 #include "base/strings/string_number_conversions.h"
 #include "base/strings/string_split.h"
+#include "base/strings/strcat.h"
+#include "base/strings/string_util.h"
 #include "base/task/sequenced_task_runner.h"
 #include "base/values.h"
 #include "build/build_config.h"
 #include "components/cronet/cronet_proxy_delegate.h"
 #include "net/base/address_family.h"
 #include "net/base/ip_address.h"
+#include "net/base/proxy_server.h"
 #include "net/base/url_util.h"
+#include "url/gurl.h"
 #include "net/cert/caching_cert_verifier.h"
 #include "net/cert/cert_verifier.h"
 #include "net/cert/cert_verify_proc.h"
@@ -288,6 +292,132 @@ auto map(std::optional<T> maybe, F&& f) {
   return std::optional<std::invoke_result_t<F, T>>(f(maybe.value()));
 }
 
+const char kCronetProxyFieldName[] = "CronetProxy";
+const char kCronetProxyProxiesKey[] = "proxies";
+const char kCronetProxyUrlKey[] = "url";
+
+bool AppendProxyFromUrlSpec(const std::string& url_spec,
+                            cronet::proto::ProxyOptions* options) {
+  std::string trimmed = url_spec;
+  base::TrimWhitespaceASCII(trimmed, base::TRIM_ALL, &trimmed);
+  if (base::EqualsCaseInsensitiveASCII(trimmed, "direct://") ||
+      base::EqualsCaseInsensitiveASCII(trimmed, "direct:")) {
+    options->add_proxies()->set_scheme(cronet::proto::ProxyScheme::DIRECT);
+    return true;
+  }
+
+  GURL url(trimmed);
+  if (!url.is_valid()) {
+    LOG(ERROR) << "Invalid proxy URL: " << url_spec;
+    return false;
+  }
+
+  if (url.SchemeIs("direct")) {
+    options->add_proxies()->set_scheme(cronet::proto::ProxyScheme::DIRECT);
+    return true;
+  }
+
+  std::optional<cronet::proto::ProxyScheme> proto_scheme;
+  std::optional<net::ProxyServer::Scheme> net_scheme;
+  if (url.SchemeIs("http")) {
+    proto_scheme = cronet::proto::ProxyScheme::HTTP;
+    net_scheme = net::ProxyServer::SCHEME_HTTP;
+  } else if (url.SchemeIs("https")) {
+    proto_scheme = cronet::proto::ProxyScheme::HTTPS;
+    net_scheme = net::ProxyServer::SCHEME_HTTPS;
+  } else if (url.SchemeIs("socks4")) {
+    proto_scheme = cronet::proto::ProxyScheme::SOCKS4;
+    net_scheme = net::ProxyServer::SCHEME_SOCKS4;
+  } else if (url.SchemeIs("socks5")) {
+    proto_scheme = cronet::proto::ProxyScheme::SOCKS5;
+    net_scheme = net::ProxyServer::SCHEME_SOCKS5;
+  } else {
+    LOG(ERROR) << "Unsupported proxy scheme in URL: " << url_spec;
+    return false;
+  }
+
+  std::string host(url.host());
+  if (host.empty()) {
+    LOG(ERROR) << "Proxy URL missing host: " << url_spec;
+    return false;
+  }
+
+  int port_int;
+  if (url.has_port()) {
+    port_int = url.IntPort();
+  } else {
+    port_int = net::ProxyServer::GetDefaultPortForScheme(*net_scheme);
+  }
+  if (port_int <= 0 || port_int > 65535) {
+    LOG(ERROR) << "Invalid proxy port for URL: " << url_spec;
+    return false;
+  }
+
+  cronet::proto::Proxy* p = options->add_proxies();
+  p->set_scheme(*proto_scheme);
+  p->set_host(host);
+  p->set_port(static_cast<int32_t>(port_int));
+
+  const std::string user(url.username());
+  const std::string password(url.password());
+  if (!user.empty()) {
+    p->set_username(user);
+  }
+  if (!password.empty()) {
+    p->set_password(password);
+  }
+  return true;
+}
+
+// If |experimental_options| contains "CronetProxy", parses it into ProxyOptions,
+// removes the entry, and returns the result. Otherwise returns nullopt.
+std::optional<cronet::proto::ProxyOptions> ExtractCronetProxyFromExperimentalOptions(
+    base::DictValue& experimental_options) {
+  const base::Value* raw = experimental_options.Find(kCronetProxyFieldName);
+  if (!raw) {
+    return std::nullopt;
+  }
+  if (!raw->is_dict()) {
+    LOG(ERROR) << "\"" << kCronetProxyFieldName << "\" must be an object";
+    experimental_options.Remove(kCronetProxyFieldName);
+    return std::nullopt;
+  }
+  const base::DictValue& section = raw->GetDict();
+  const base::ListValue* proxies_list = section.FindList(kCronetProxyProxiesKey);
+  if (!proxies_list || proxies_list->empty()) {
+    LOG(ERROR) << "\"" << kCronetProxyFieldName << "." << kCronetProxyProxiesKey
+               << "\" must be a non-empty array";
+    experimental_options.Remove(kCronetProxyFieldName);
+    return std::nullopt;
+  }
+
+  cronet::proto::ProxyOptions out;
+  for (const base::Value& entry : *proxies_list) {
+    const base::DictValue* item = entry.GetIfDict();
+    if (!item) {
+      LOG(ERROR) << "Each " << kCronetProxyFieldName << " entry must be an object";
+      experimental_options.Remove(kCronetProxyFieldName);
+      return std::nullopt;
+    }
+    const std::string* url_str = item->FindString(kCronetProxyUrlKey);
+    if (!url_str || url_str->empty()) {
+      LOG(ERROR) << "Each proxy entry needs a non-empty \"" << kCronetProxyUrlKey
+                 << "\"";
+      experimental_options.Remove(kCronetProxyFieldName);
+      return std::nullopt;
+    }
+    if (!AppendProxyFromUrlSpec(*url_str, &out)) {
+      experimental_options.Remove(kCronetProxyFieldName);
+      return std::nullopt;
+    }
+  }
+  experimental_options.Remove(kCronetProxyFieldName);
+  if (out.proxies_size() == 0) {
+    return std::nullopt;
+  }
+  return out;
+}
+
 }  // namespace
 
 URLRequestContextConfig::QuicHint::QuicHint(const std::string& host,
@@ -381,13 +511,19 @@ URLRequestContextConfig::CreateURLRequestContextConfig(
     else
       experimental_options = base::DictValue();
   }
+  std::optional<cronet::proto::ProxyOptions> merged_proxy =
+      std::move(proxy_options);
+  if (auto extracted = ExtractCronetProxyFromExperimentalOptions(
+          experimental_options.value())) {
+    merged_proxy = std::move(extracted);
+  }
   return base::WrapUnique(new URLRequestContextConfig(
       enable_quic, enable_spdy, enable_brotli, http_cache, http_cache_max_size,
       load_disable_cache, storage_path, accept_language, user_agent,
       std::move(experimental_options).value(), std::move(mock_cert_verifier),
       enable_network_quality_estimator,
       bypass_public_key_pinning_for_local_trust_anchors,
-      network_thread_priority, std::move(proxy_options)));
+      network_thread_priority, std::move(merged_proxy)));
 }
 
 // static

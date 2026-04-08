@@ -29,11 +29,23 @@ SOCKSSocketParams::SOCKSSocketParams(
     const HostPortPair& host_port_pair,
     const NetworkAnonymizationKey& network_anonymization_key,
     const NetworkTrafficAnnotationTag& traffic_annotation)
+    : SOCKSSocketParams(std::move(nested_params), socks_v5, host_port_pair,
+                        network_anonymization_key, traffic_annotation,
+                        std::nullopt) {}
+
+SOCKSSocketParams::SOCKSSocketParams(
+    ConnectJobParams nested_params,
+    bool socks_v5,
+    const HostPortPair& host_port_pair,
+    const NetworkAnonymizationKey& network_anonymization_key,
+    const NetworkTrafficAnnotationTag& traffic_annotation,
+    std::optional<Socks5AuthCredentials> socks5_auth)
     : transport_params_(nested_params.take_transport()),
       destination_(host_port_pair),
       socks_v5_(socks_v5),
       network_anonymization_key_(network_anonymization_key),
-      traffic_annotation_(traffic_annotation) {}
+      traffic_annotation_(traffic_annotation),
+      socks5_auth_(std::move(socks5_auth)) {}
 
 SOCKSSocketParams::~SOCKSSocketParams() = default;
 
@@ -178,7 +190,7 @@ int SOCKSConnectJob::DoSOCKSConnect() {
   if (socks_params_->is_socks_v5()) {
     socket_ = std::make_unique<SOCKS5ClientSocket>(
         transport_connect_job_->PassSocket(), socks_params_->destination(),
-        socks_params_->traffic_annotation());
+        socks_params_->traffic_annotation(), socks_params_->socks5_auth());
   } else {
     auto socks_socket = std::make_unique<SOCKSClientSocket>(
         transport_connect_job_->PassSocket(), socks_params_->destination(),

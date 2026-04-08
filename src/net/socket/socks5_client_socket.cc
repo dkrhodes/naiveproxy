@@ -6,8 +6,8 @@
 
 #include <stdint.h>
 
-#include <array>
 #include <utility>
+#include <vector>
 
 #include "base/compiler_specific.h"
 #include "base/format_macros.h"
@@ -38,11 +38,13 @@ static_assert(sizeof(struct in6_addr) == 16, "incorrect system size of IPv6");
 SOCKS5ClientSocket::SOCKS5ClientSocket(
     std::unique_ptr<StreamSocket> transport_socket,
     const HostPortPair& destination,
-    const NetworkTrafficAnnotationTag& traffic_annotation)
+    const NetworkTrafficAnnotationTag& traffic_annotation,
+    std::optional<Socks5AuthCredentials> socks5_auth)
     : io_callback_(base::BindRepeating(&SOCKS5ClientSocket::OnIOComplete,
                                        base::Unretained(this))),
       transport_socket_(std::move(transport_socket)),
       destination_(destination),
+      socks5_auth_(std::move(socks5_auth)),
       net_log_(transport_socket_->NetLog()),
       traffic_annotation_(traffic_annotation) {}
 
@@ -224,6 +226,26 @@ int SOCKS5ClientSocket::DoLoop(int last_io_result) {
         net_log_.EndEventWithNetErrorCode(NetLogEventType::SOCKS5_GREET_READ,
                                           rv);
         break;
+      case STATE_AUTH_WRITE:
+        DCHECK_EQ(OK, rv);
+        net_log_.BeginEvent(NetLogEventType::SOCKS5_HANDSHAKE_WRITE);
+        rv = DoAuthWrite();
+        break;
+      case STATE_AUTH_WRITE_COMPLETE:
+        rv = DoAuthWriteComplete(rv);
+        net_log_.EndEventWithNetErrorCode(NetLogEventType::SOCKS5_HANDSHAKE_WRITE,
+                                          rv);
+        break;
+      case STATE_AUTH_READ:
+        DCHECK_EQ(OK, rv);
+        net_log_.BeginEvent(NetLogEventType::SOCKS5_HANDSHAKE_READ);
+        rv = DoAuthRead();
+        break;
+      case STATE_AUTH_READ_COMPLETE:
+        rv = DoAuthReadComplete(rv);
+        net_log_.EndEventWithNetErrorCode(NetLogEventType::SOCKS5_HANDSHAKE_READ,
+                                          rv);
+        break;
       case STATE_HANDSHAKE_WRITE:
         DCHECK_EQ(OK, rv);
         net_log_.BeginEvent(NetLogEventType::SOCKS5_HANDSHAKE_WRITE);
@@ -251,9 +273,6 @@ int SOCKS5ClientSocket::DoLoop(int last_io_result) {
   return rv;
 }
 
-static constexpr std::array<uint8_t, 3> kSOCKS5GreetWriteData{
-    0x05, 0x01, 0x00};  // no authentication
-
 int SOCKS5ClientSocket::DoGreetWrite() {
   // Since we only have 1 byte to send the hostname length in, if the
   // URL has a hostname longer than 255 characters we can't send it.
@@ -263,10 +282,26 @@ int SOCKS5ClientSocket::DoGreetWrite() {
   }
 
   if (!write_buf_) {
+    std::vector<uint8_t> greet;
+    greet.push_back(kSOCKS5Version);
+    if (socks5_auth_.has_value()) {
+      if (socks5_auth_->username.size() > 255 ||
+          socks5_auth_->password.size() > 255) {
+        net_log_.AddEvent(NetLogEventType::SOCKS_HOSTNAME_TOO_BIG);
+        return ERR_SOCKS_CONNECTION_FAILED;
+      }
+      greet.push_back(0x02);
+      greet.push_back(0x00);
+      greet.push_back(0x02);
+    } else {
+      greet.push_back(0x01);
+      greet.push_back(0x00);
+    }
     auto greet_buffer =
-        base::MakeRefCounted<WrappedIOBuffer>(kSOCKS5GreetWriteData);
+        base::MakeRefCounted<VectorIOBuffer>(std::move(greet));
+    const size_t greet_size = greet_buffer->size();
     write_buf_ = base::MakeRefCounted<DrainableIOBuffer>(
-        std::move(greet_buffer), greet_buffer->size());
+        std::move(greet_buffer), greet_size);
   }
 
   next_state_ = STATE_GREET_WRITE_COMPLETE;
@@ -323,9 +358,100 @@ int SOCKS5ClientSocket::DoGreetReadComplete(int result) {
                                    "version", read_data[0]);
     return ERR_SOCKS_CONNECTION_FAILED;
   }
-  if (read_data[1] != 0x00) {
+  const uint8_t server_method = read_data[1];
+  if (server_method == 0xFF) {
+    net_log_.AddEvent(NetLogEventType::SOCKS_NO_ACCEPTABLE_AUTH);
+    return ERR_SOCKS_CONNECTION_FAILED;
+  }
+  if (server_method == 0x00) {
+    read_buf_.reset();
+    next_state_ = STATE_HANDSHAKE_WRITE;
+    return OK;
+  }
+  if (server_method == 0x02) {
+    if (!socks5_auth_.has_value()) {
+      net_log_.AddEventWithIntParams(NetLogEventType::SOCKS_UNEXPECTED_AUTH,
+                                     "method", server_method);
+      return ERR_SOCKS_CONNECTION_FAILED;
+    }
+    read_buf_.reset();
+    next_state_ = STATE_AUTH_WRITE;
+    return OK;
+  }
+  net_log_.AddEventWithIntParams(NetLogEventType::SOCKS_UNEXPECTED_AUTH, "method",
+                                 server_method);
+  return ERR_SOCKS_CONNECTION_FAILED;
+}
+
+int SOCKS5ClientSocket::DoAuthWrite() {
+  next_state_ = STATE_AUTH_WRITE_COMPLETE;
+  DCHECK(socks5_auth_.has_value());
+  if (!write_buf_) {
+    std::vector<uint8_t> auth;
+    auth.push_back(0x01);
+    auth.push_back(
+        base::checked_cast<uint8_t>(socks5_auth_->username.size()));
+    auth.insert(auth.end(), socks5_auth_->username.begin(),
+                socks5_auth_->username.end());
+    auth.push_back(
+        base::checked_cast<uint8_t>(socks5_auth_->password.size()));
+    auth.insert(auth.end(), socks5_auth_->password.begin(),
+                socks5_auth_->password.end());
+    auto auth_buffer =
+        base::MakeRefCounted<VectorIOBuffer>(std::move(auth));
+    const size_t auth_size = auth_buffer->size();
+    write_buf_ = base::MakeRefCounted<DrainableIOBuffer>(std::move(auth_buffer),
+                                                         auth_size);
+  }
+  return transport_socket_->Write(write_buf_.get(),
+                                  write_buf_->BytesRemaining(), io_callback_,
+                                  traffic_annotation_);
+}
+
+int SOCKS5ClientSocket::DoAuthWriteComplete(int result) {
+  if (result < 0)
+    return result;
+
+  write_buf_->DidConsume(result);
+  if (write_buf_->BytesRemaining() == 0) {
+    write_buf_.reset();
+    next_state_ = STATE_AUTH_READ;
+  } else {
+    next_state_ = STATE_AUTH_WRITE;
+  }
+  return OK;
+}
+
+int SOCKS5ClientSocket::DoAuthRead() {
+  next_state_ = STATE_AUTH_READ_COMPLETE;
+  if (!read_buf_) {
+    read_buf_ = base::MakeRefCounted<GrowableIOBuffer>();
+    read_buf_->SetCapacity(2);
+  }
+  return transport_socket_->Read(read_buf_.get(),
+                                 read_buf_->RemainingCapacity(), io_callback_);
+}
+
+int SOCKS5ClientSocket::DoAuthReadComplete(int result) {
+  if (result < 0)
+    return result;
+
+  if (result == 0) {
+    net_log_.AddEvent(
+        NetLogEventType::SOCKS_UNEXPECTEDLY_CLOSED_DURING_HANDSHAKE);
+    return ERR_SOCKS_CONNECTION_FAILED;
+  }
+
+  read_buf_->set_offset(read_buf_->offset() + result);
+  if (read_buf_->RemainingCapacity() > 0) {
+    next_state_ = STATE_AUTH_READ;
+    return OK;
+  }
+
+  base::span<uint8_t> read_data = read_buf_->span_before_offset();
+  if (read_data[0] != 0x01 || read_data[1] != 0x00) {
     net_log_.AddEventWithIntParams(NetLogEventType::SOCKS_UNEXPECTED_AUTH,
-                                   "method", read_data[1]);
+                                   "method", read_data.size() > 1 ? read_data[1] : 0);
     return ERR_SOCKS_CONNECTION_FAILED;
   }
 
@@ -355,8 +481,9 @@ scoped_refptr<DrainableIOBuffer> SOCKS5ClientSocket::BuildHandshakeWriteBuffer()
   handshake.insert(handshake.end(), nw_port.begin(), nw_port.end());
 
   auto base_buffer = base::MakeRefCounted<VectorIOBuffer>(std::move(handshake));
+  const size_t handshake_size = base_buffer->size();
   return base::MakeRefCounted<DrainableIOBuffer>(std::move(base_buffer),
-                                                 base_buffer->size());
+                                                 handshake_size);
 }
 
 // Writes the SOCKS handshake data to the underlying socket connection.

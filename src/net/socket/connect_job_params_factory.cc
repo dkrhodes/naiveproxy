@@ -267,7 +267,7 @@ ConnectJobParams CreateProxyParams(
     params = ConnectJobParams(base::MakeRefCounted<SOCKSSocketParams>(
         std::move(params), proxy_server.scheme() == ProxyServer::SCHEME_SOCKS5,
         ToHostPortPair(endpoint), network_anonymization_key,
-        *proxy_annotation_tag));
+        *proxy_annotation_tag, proxy_chain.socks5_auth()));
   }
 
   return params;

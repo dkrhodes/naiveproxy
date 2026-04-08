@@ -6,6 +6,7 @@
 #define NET_SOCKET_SOCKS_CONNECT_JOB_H_
 
 #include <memory>
+#include <optional>
 
 #include "base/memory/raw_ptr.h"
 #include "base/memory/ref_counted.h"
@@ -13,6 +14,7 @@
 #include "net/base/completion_once_callback.h"
 #include "net/base/host_port_pair.h"
 #include "net/base/net_export.h"
+#include "net/base/socks5_auth_credentials.h"
 #include "net/base/network_isolation_key.h"
 #include "net/base/request_priority.h"
 #include "net/dns/public/resolve_error_info.h"
@@ -36,6 +38,15 @@ class NET_EXPORT_PRIVATE SOCKSSocketParams
                     const NetworkAnonymizationKey& network_anonymization_key,
                     const NetworkTrafficAnnotationTag& traffic_annotation);
 
+  // When `socks_v5` is true and `socks5_auth` is set, RFC 1929 credentials are
+  // offered in the SOCKS5 handshake.
+  SOCKSSocketParams(ConnectJobParams nested_params,
+                    bool socks_v5,
+                    const HostPortPair& host_port_pair,
+                    const NetworkAnonymizationKey& network_anonymization_key,
+                    const NetworkTrafficAnnotationTag& traffic_annotation,
+                    std::optional<Socks5AuthCredentials> socks5_auth);
+
   SOCKSSocketParams(const SOCKSSocketParams&) = delete;
   SOCKSSocketParams& operator=(const SOCKSSocketParams&) = delete;
 
@@ -52,6 +63,10 @@ class NET_EXPORT_PRIVATE SOCKSSocketParams
     return traffic_annotation_;
   }
 
+  const std::optional<Socks5AuthCredentials>& socks5_auth() const {
+    return socks5_auth_;
+  }
+
  private:
   friend class base::RefCounted<SOCKSSocketParams>;
   ~SOCKSSocketParams();
@@ -64,6 +79,8 @@ class NET_EXPORT_PRIVATE SOCKSSocketParams
   const NetworkAnonymizationKey network_anonymization_key_;
 
   NetworkTrafficAnnotationTag traffic_annotation_;
+
+  std::optional<Socks5AuthCredentials> socks5_auth_;
 };
 
 // SOCKSConnectJob handles establishing a connection to a SOCKS4 or SOCKS5 proxy

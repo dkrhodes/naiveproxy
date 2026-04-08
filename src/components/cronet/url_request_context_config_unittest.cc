@@ -4,6 +4,8 @@
 
 #include "components/cronet/url_request_context_config.h"
 
+#include "components/cronet/proto/request_context_config.pb.h"
+
 #include <memory>
 #include <string_view>
 
@@ -1574,5 +1576,46 @@ TEST(URLRequestContextConfigTest, HttpsSvcbOptions) {
 }
 
 // See stale_host_resolver_unittest.cc for test of StaleDNS options.
+
+TEST(URLRequestContextConfigTest, CronetProxyFromExperimentalOptions) {
+  base::test::TaskEnvironment task_environment_(
+      base::test::TaskEnvironment::MainThreadType::IO);
+
+  const char kJson[] =
+      R"({"QUIC":{"idle_connection_timeout_seconds":1},"CronetProxy":{"proxies":[{"url":"http://user:pass@10.0.0.1:8080"},{"url":"socks5://127.0.0.1"},{"url":"direct://"}]}})";
+
+  std::unique_ptr<URLRequestContextConfig> config =
+      URLRequestContextConfig::CreateURLRequestContextConfig(
+          true,
+          true,
+          false,
+          URLRequestContextConfig::HttpCacheType::MEMORY,
+          0,
+          false,
+          "",
+          "en",
+          "ua",
+          kJson,
+          std::unique_ptr<net::CertVerifier>(),
+          false,
+          true,
+          std::nullopt,
+          std::nullopt);
+
+  ASSERT_TRUE(config);
+  ASSERT_TRUE(config->proxy_options.has_value());
+  const cronet::proto::ProxyOptions& po = config->proxy_options.value();
+  ASSERT_EQ(3, po.proxies_size());
+  EXPECT_EQ(cronet::proto::ProxyScheme::HTTP, po.proxies(0).scheme());
+  EXPECT_EQ("10.0.0.1", po.proxies(0).host());
+  EXPECT_EQ(8080, po.proxies(0).port());
+  EXPECT_EQ("user", po.proxies(0).username());
+  EXPECT_EQ("pass", po.proxies(0).password());
+  EXPECT_EQ(cronet::proto::ProxyScheme::SOCKS5, po.proxies(1).scheme());
+  EXPECT_EQ("127.0.0.1", po.proxies(1).host());
+  EXPECT_EQ(1080, po.proxies(1).port());
+  EXPECT_EQ(cronet::proto::ProxyScheme::DIRECT, po.proxies(2).scheme());
+  EXPECT_FALSE(config->effective_experimental_options.contains("CronetProxy"));
+}
 
 }  // namespace cronet

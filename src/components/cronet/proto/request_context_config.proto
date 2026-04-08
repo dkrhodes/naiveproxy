@@ -34,6 +34,9 @@ message Proxy {
   optional ProxyScheme scheme = 1;
   optional string host = 2;
   optional int32 port = 3;
+  // For http/https proxies, optional preemptive Basic credentials for CONNECT.
+  optional string username = 4;
+  optional string password = 5;
 }
 
 // Maps to org.chromium.net.Proxy.Scheme.
@@ -43,4 +46,6 @@ enum ProxyScheme {
   DIRECT = 0;
   HTTP = 1;
   HTTPS = 2;
+  SOCKS4 = 3;
+  SOCKS5 = 4;
 }
