@@ -449,10 +449,17 @@ int SOCKS5ClientSocket::DoAuthReadComplete(int result) {
   }
 
   base::span<uint8_t> read_data = read_buf_->span_before_offset();
-  if (read_data[0] != 0x01 || read_data[1] != 0x00) {
+  // RFC 1929: first byte is subnegotiation version (must be 0x01), second is
+  // status (0x00 success; non-zero means authentication rejected).
+  if (read_data[0] != 0x01) {
     net_log_.AddEventWithIntParams(NetLogEventType::SOCKS_UNEXPECTED_AUTH,
-                                   "method", read_data.size() > 1 ? read_data[1] : 0);
+                                   "version", read_data[0]);
     return ERR_SOCKS_CONNECTION_FAILED;
+  }
+  if (read_data[1] != 0x00) {
+    net_log_.AddEventWithIntParams(NetLogEventType::SOCKS_UNEXPECTED_AUTH,
+                                   "rfc1929_status", read_data[1]);
+    return ERR_INVALID_AUTH_CREDENTIALS;
   }
 
   read_buf_.reset();
