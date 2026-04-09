@@ -28,8 +28,11 @@
 #include "net/base/net_errors.h"
 #include "net/base/hash_value.h"
 #include "net/base/proxy_delegate.h"
+#include "net/cert/cert_status_flags.h"
+#include "net/cert/cert_verifier.h"
 #include "net/cert/cert_verify_proc.h"
 #include "net/cert/cert_verify_proc_builtin.h"
+#include "net/cert/cert_verify_result.h"
 #include "net/cert/crl_set.h"
 #include "net/cert/ct_policy_enforcer.h"
 #include "net/cert/do_nothing_ct_verifier.h"
@@ -654,6 +657,147 @@ class CustomRootSystemTrustStore : public net::SystemTrustStore {
   std::unique_ptr<bssl::TrustStoreInMemory> trust_store_;
 };
 
+// A CertVerifier that accepts any certificate chain (no validation).
+// For testing / dev use only.
+class InsecureCronetCertVerifier : public net::CertVerifier {
+ public:
+  InsecureCronetCertVerifier() = default;
+  InsecureCronetCertVerifier(const InsecureCronetCertVerifier&) = delete;
+  InsecureCronetCertVerifier& operator=(const InsecureCronetCertVerifier&) = delete;
+
+  int Verify(const RequestParams& params,
+             net::CertVerifyResult* verify_result,
+             net::CompletionOnceCallback callback,
+             std::unique_ptr<Request>* out_req,
+             const net::NetLogWithSource& net_log) override {
+    (void)callback;
+    if (out_req) {
+      *out_req = nullptr;
+    }
+    verify_result->Reset();
+    verify_result->verified_cert = params.certificate();
+    verify_result->cert_status = 0;
+    // Must be true so that ProofVerifierChromium does not override net::OK
+    // with ERR_QUIC_CERT_ROOT_NOT_KNOWN for QUIC connections.
+    verify_result->is_issued_by_known_root = true;
+    return net::OK;
+  }
+
+  void Verify2QwacBinding(
+      const std::string& binding,
+      const std::string& hostname,
+      const scoped_refptr<net::X509Certificate>& tls_cert,
+      base::OnceCallback<void(const scoped_refptr<net::X509Certificate>&)>
+          callback,
+      const net::NetLogWithSource& net_log) override {
+    base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
+        FROM_HERE,
+        base::BindOnce(
+            [](base::OnceCallback<void(
+                   const scoped_refptr<net::X509Certificate>&)> cb) {
+              std::move(cb).Run(nullptr);
+            },
+            std::move(callback)));
+  }
+
+  void SetConfig(const Config& config) override {}
+
+  void AddObserver(Observer* observer) override {
+    observers_.AddObserver(observer);
+  }
+
+  void RemoveObserver(Observer* observer) override {
+    observers_.RemoveObserver(observer);
+  }
+
+ private:
+  base::ObserverList<Observer> observers_;
+};
+
+// Wraps an inner CertVerifier and marks every successful verification as
+// is_issued_by_known_root = true. This is required so that
+// ProofVerifierChromium does not turn a valid custom-CA result into
+// ERR_QUIC_CERT_ROOT_NOT_KNOWN when establishing QUIC connections.
+class KnownRootOverrideCertVerifier : public net::CertVerifier {
+ public:
+  explicit KnownRootOverrideCertVerifier(
+      std::unique_ptr<net::CertVerifier> inner)
+      : inner_(std::move(inner)) {}
+
+  KnownRootOverrideCertVerifier(const KnownRootOverrideCertVerifier&) = delete;
+  KnownRootOverrideCertVerifier& operator=(
+      const KnownRootOverrideCertVerifier&) = delete;
+
+  // Returns true if we should accept the certificate despite |rv| being an
+  // error.  This is the case when the cert chain was cryptographically valid
+  // against our custom CA (CERT_STATUS_AUTHORITY_INVALID not set) but other
+  // policy checks (hostname, revocation, CT, …) failed.  We treat our custom
+  // CA as fully trusted for dev/testing, so we accept in that case.
+  static bool ShouldAcceptDespiteError(int rv,
+                                       const net::CertVerifyResult& result) {
+    if (rv == net::OK)
+      return true;
+    // If the CA itself was not trusted, don't override — the cert is genuinely
+    // invalid for this trust store.
+    return !(result.cert_status & net::CERT_STATUS_AUTHORITY_INVALID);
+  }
+
+  static void AcceptResult(net::CertVerifyResult* result) {
+    result->cert_status = 0;
+    result->is_issued_by_known_root = true;
+  }
+
+  int Verify(const RequestParams& params,
+             net::CertVerifyResult* verify_result,
+             net::CompletionOnceCallback callback,
+             std::unique_ptr<Request>* out_req,
+             const net::NetLogWithSource& net_log) override {
+    // Wrap the callback so that async completions also get the override.
+    auto wrapped = base::BindOnce(
+        [](net::CertVerifyResult* result, net::CompletionOnceCallback original,
+           int rv) {
+          if (ShouldAcceptDespiteError(rv, *result)) {
+            AcceptResult(result);
+            rv = net::OK;
+          }
+          std::move(original).Run(rv);
+        },
+        verify_result, std::move(callback));
+
+    int rv = inner_->Verify(params, verify_result, std::move(wrapped), out_req,
+                            net_log);
+    if (rv != net::ERR_IO_PENDING && ShouldAcceptDespiteError(rv, *verify_result)) {
+      AcceptResult(verify_result);
+      rv = net::OK;
+    }
+    return rv;
+  }
+
+  void Verify2QwacBinding(
+      const std::string& binding,
+      const std::string& hostname,
+      const scoped_refptr<net::X509Certificate>& tls_cert,
+      base::OnceCallback<void(const scoped_refptr<net::X509Certificate>&)>
+          callback,
+      const net::NetLogWithSource& net_log) override {
+    inner_->Verify2QwacBinding(binding, hostname, tls_cert, std::move(callback),
+                               net_log);
+  }
+
+  void SetConfig(const Config& config) override { inner_->SetConfig(config); }
+
+  void AddObserver(Observer* observer) override {
+    inner_->AddObserver(observer);
+  }
+
+  void RemoveObserver(Observer* observer) override {
+    inner_->RemoveObserver(observer);
+  }
+
+ private:
+  std::unique_ptr<net::CertVerifier> inner_;
+};
+
 // A CertVerifyProcFactory that always returns the same fixed CertVerifyProc.
 class FixedCertVerifyProcFactory : public net::CertVerifyProcFactory {
  public:
@@ -739,9 +883,17 @@ CRONET_EXPORT void* Cronet_CreateCertVerifierWithRootCerts(
   auto verify_proc_factory =
       base::MakeRefCounted<FixedCertVerifyProcFactory>(verify_proc);
 
-  // Create the MultiThreadedCertVerifier with both verify_proc and factory
-  auto* verifier = new net::MultiThreadedCertVerifier(
-      std::move(verify_proc), std::move(verify_proc_factory));
+  // Wrap in KnownRootOverrideCertVerifier so that QUIC's ProofVerifierChromium
+  // does not reject the result as ERR_QUIC_CERT_ROOT_NOT_KNOWN when the proxy
+  // certificate was signed by a local/private CA.
+  auto* verifier = new KnownRootOverrideCertVerifier(
+      std::make_unique<net::MultiThreadedCertVerifier>(
+          std::move(verify_proc), std::move(verify_proc_factory)));
 
   return verifier;
+}
+
+CRONET_EXPORT void* Cronet_CreateInsecureCertVerifierForTesting() {
+  cronet::EnsureInitialized();
+  return new InsecureCronetCertVerifier();
 }

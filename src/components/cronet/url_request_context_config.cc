@@ -331,6 +331,9 @@ bool AppendProxyFromUrlSpec(const std::string& url_spec,
   } else if (url.SchemeIs("socks5")) {
     proto_scheme = cronet::proto::ProxyScheme::SOCKS5;
     net_scheme = net::ProxyServer::SCHEME_SOCKS5;
+  } else if (url.SchemeIs("quic")) {
+    proto_scheme = cronet::proto::ProxyScheme::QUIC;
+    net_scheme = net::ProxyServer::SCHEME_QUIC;
   } else {
     LOG(ERROR) << "Unsupported proxy scheme in URL: " << url_spec;
     return false;

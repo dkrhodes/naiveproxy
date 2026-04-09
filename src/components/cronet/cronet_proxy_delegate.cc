@@ -82,6 +82,9 @@ void CronetProxyDelegate::OnResolveProxy(
           case cronet::proto::ProxyScheme::SOCKS5:
             scheme = net::ProxyServer::Scheme::SCHEME_SOCKS5;
             break;
+          case cronet::proto::ProxyScheme::QUIC:
+            scheme = net::ProxyServer::Scheme::SCHEME_QUIC;
+            break;
           default:
             NOTREACHED();
         }
