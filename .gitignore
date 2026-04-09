@@ -8,3 +8,4 @@ src/out/
 .idea/
 .DS_Store
 *.pyc
+src/build/linux/*-sysroot

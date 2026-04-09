@@ -1618,4 +1618,42 @@ TEST(URLRequestContextConfigTest, CronetProxyFromExperimentalOptions) {
   EXPECT_FALSE(config->effective_experimental_options.contains("CronetProxy"));
 }
 
+TEST(URLRequestContextConfigTest, CronetProxyQuicUrlFromExperimentalOptions) {
+  base::test::TaskEnvironment task_environment_(
+      base::test::TaskEnvironment::MainThreadType::IO);
+
+  const char kJson[] =
+      R"({"CronetProxy":{"proxies":[{"url":"quic://user:pass@proxy.example:443"},{"url":"direct://"}]}})";
+
+  std::unique_ptr<URLRequestContextConfig> config =
+      URLRequestContextConfig::CreateURLRequestContextConfig(
+          true,
+          true,
+          false,
+          URLRequestContextConfig::HttpCacheType::MEMORY,
+          0,
+          false,
+          "",
+          "en",
+          "ua",
+          kJson,
+          std::unique_ptr<net::CertVerifier>(),
+          false,
+          true,
+          std::nullopt,
+          std::nullopt);
+
+  ASSERT_TRUE(config);
+  ASSERT_TRUE(config->proxy_options.has_value());
+  const cronet::proto::ProxyOptions& po = config->proxy_options.value();
+  ASSERT_EQ(2, po.proxies_size());
+  EXPECT_EQ(cronet::proto::ProxyScheme::QUIC, po.proxies(0).scheme());
+  EXPECT_EQ("proxy.example", po.proxies(0).host());
+  EXPECT_EQ(443, po.proxies(0).port());
+  EXPECT_EQ("user", po.proxies(0).username());
+  EXPECT_EQ("pass", po.proxies(0).password());
+  EXPECT_EQ(cronet::proto::ProxyScheme::DIRECT, po.proxies(1).scheme());
+  EXPECT_FALSE(config->effective_experimental_options.contains("CronetProxy"));
+}
+
 }  // namespace cronet

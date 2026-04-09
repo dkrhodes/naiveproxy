@@ -40,6 +40,11 @@ CRONET_EXPORT stream_engine* Cronet_Engine_GetStreamEngine(
 CRONET_EXPORT void* Cronet_CreateCertVerifierWithRootCerts(
     const char* pem_root_certs);
 
+// Creates a CertVerifier that accepts any certificate chain (no validation).
+// For testing only. Pass to Cronet_Engine_SetMockCertVerifierForTesting().
+// Returns nullptr only if internal initialization fails (normally non-null).
+CRONET_EXPORT void* Cronet_CreateInsecureCertVerifierForTesting(void);
+
 // Dialer callback type for custom TCP connection establishment.
 // context: User-provided context pointer passed to Cronet_Engine_SetDialer.
 // address: IP address string (e.g. "1.2.3.4" or "::1").

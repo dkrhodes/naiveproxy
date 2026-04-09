@@ -48,4 +48,5 @@ enum ProxyScheme {
   HTTPS = 2;
   SOCKS4 = 3;
   SOCKS5 = 4;
+  QUIC = 5;
 }
